@@ -15,9 +15,10 @@ use Symfony\Component\Mime\Address;
  *
  * Supported modes
  * ───────────────
- * smtp_relay / to  — Individual round-robin: one email per user per turn.
- *                    After every full rotation, waits `delay_after_rotation`
- *                    seconds and sends a monitor/pantau email.
+ * smtp_relay / to  — Per-batch round-robin: emails are split into batches
+ *                    equal to the number of users. All emails in a batch are
+ *                    sent immediately (no delay). After every batch, waits
+ *                    `delay_after_rotation` seconds and sends a monitor email.
  *
  * smtp_relay / bcc — Batch BCC: each user sends one BCC email to
  *                    `bcc_batch_size` recipients, then waits a random delay
@@ -210,81 +211,72 @@ class Mailer
     // ─── TO mode ────────────────────────────────────────────────
 
     /**
-     * SMTP Relay "TO" mode — round-robin, one email per user per turn.
+     * SMTP Relay "TO" mode — per-batch round-robin sending.
      *
-     * After one full rotation (all users used once), the script:
+     * Batch size equals the number of configured users. Within each batch all
+     * emails are sent immediately (no sleep). After every batch the script:
      *   1. Waits `delay_after_rotation` seconds.
      *   2. Sends a monitor/pantau email using the first user.
-     *   3. Continues with the next rotation.
+     *   3. Continues with the next batch.
      */
     private function runSmtpRelayTo(SmtpRelayTransport $transport): void
     {
         $this->printLine("Mode: SMTP Relay → TO (round-robin)");
         echo PHP_EOL;
 
-        $totalEmails  = count($this->emailList);
         $totalUsers   = count($this->users);
         $delay        = (int) ($this->config['delay_after_rotation'] ?? 3);
         $monitorEmail = $this->config['monitor_email'] ?? '';
 
-        $rotationNum  = 0;
+        // Split recipient list into chunks, one chunk per full user rotation
+        $batches  = array_chunk($this->emailList, $totalUsers);
+        $emailNum = 0;
 
-        for ($i = 0; $i < $totalEmails; $i++) {
-            $recipient  = $this->emailList[$i];
-            $userIndex  = $i % $totalUsers;
-            $userEmail  = $this->users[$userIndex];
-            $userNum    = $userIndex + 1;
-            $emailNum   = $i + 1;
+        foreach ($batches as $batchIndex => $batch) {
+            $batchNum = $batchIndex + 1;
+            $this->printLine("[Batch {$batchNum}]");
 
-            // After a full rotation, pause + send monitor email
-            if ($i > 0 && $userIndex === 0) {
-                $rotationNum++;
-                $this->printLine("");
+            // Send all emails in this batch without any delay
+            foreach ($batch as $localIndex => $recipient) {
+                $emailNum++;
+                $userIndex = $localIndex % $totalUsers;
+                $userEmail = $this->users[$userIndex];
+                $userNum   = $userIndex + 1;
+
                 $this->printLine(
-                    "[Wait {$delay}s] Rotation #{$rotationNum} complete. " .
-                    "Sending monitor email to {$monitorEmail} using user 1..."
+                    "{$emailNum}. {$recipient} => sending with user {$userNum} ({$userEmail})"
                 );
 
-                sleep($delay);
-                $this->sendMonitorEmail($transport, $this->users[0], $rotationNum);
-                $this->printLine("");
-            }
+                try {
+                    $email = (new Email())
+                        ->from(new Address($userEmail, $this->config['from_name'] ?? 'Sender'))
+                        ->to($recipient)
+                        ->subject($this->config['subject'] ?? '(no subject)')
+                        ->html($this->renderTemplate($this->htmlTemplate, $recipient))
+                        ->text($this->renderTemplate($this->textTemplate, $recipient));
 
-            // Send the email
-            $this->printLine(
-                "{$emailNum}. {$recipient} => sending with user {$userNum} ({$userEmail})"
-            );
-
-            try {
-                $email = (new Email())
-                    ->from(new Address($userEmail, $this->config['from_name'] ?? 'Sender'))
-                    ->to($recipient)
-                    ->subject($this->config['subject'] ?? '(no subject)')
-                    ->html($this->renderTemplate($this->htmlTemplate, $recipient))
-                    ->text($this->renderTemplate($this->textTemplate, $recipient));
-
-                foreach ($this->attachments as $path) {
-                    if (is_file($path) && is_readable($path)) {
-                        $email->attachFromPath($path);
+                    foreach ($this->attachments as $path) {
+                        if (is_file($path) && is_readable($path)) {
+                            $email->attachFromPath($path);
+                        }
                     }
+
+                    $transport->send($email, $userEmail);
+                } catch (\Throwable $e) {
+                    $this->printLine("  [ERROR] Failed to send to {$recipient}: " . $e->getMessage());
                 }
-
-                $transport->send($email, $userEmail);
-            } catch (\Throwable $e) {
-                $this->printLine("  [ERROR] Failed to send to {$recipient}: " . $e->getMessage());
             }
-        }
 
-        // Final rotation monitor email (if we sent any emails)
-        if ($totalEmails > 0 && $monitorEmail !== '') {
-            $rotationNum++;
+            // After the batch: wait, then send monitor email
             $this->printLine("");
             $this->printLine(
-                "[Wait {$delay}s] Final rotation #{$rotationNum}. " .
+                "[Wait {$delay}s] Batch #{$batchNum} complete. " .
                 "Sending monitor email to {$monitorEmail}..."
             );
+
             sleep($delay);
-            $this->sendMonitorEmail($transport, $this->users[0], $rotationNum);
+            $this->sendMonitorEmail($transport, $this->users[0], $batchNum);
+            echo PHP_EOL;
         }
     }
 

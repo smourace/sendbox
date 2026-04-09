@@ -48,7 +48,7 @@ return [
     // Monitoring / Pantau Email
     // ─────────────────────────────────────────────
 
-    // This email receives a copy after every rotation (TO mode)
+    // This email receives a copy after every batch (TO mode)
     // or after every batch (BCC mode), for monitoring purposes.
     'monitor_email' => 'pantau@example.com',
 
@@ -56,7 +56,7 @@ return [
     // Delay Settings
     // ─────────────────────────────────────────────
 
-    // Seconds to wait after one full user rotation (TO mode only)
+    // Seconds to wait after each TO-mode batch (one full user rotation)
     'delay_after_rotation' => 3,
 
     // ─────────────────────────────────────────────
