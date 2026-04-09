@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace App;
 
+use Symfony\Component\Mime\Email;
+use Symfony\Component\Mime\Address;
+
 /**
  * Mailer — Main Orchestrator
  *
@@ -189,9 +192,15 @@ class Mailer
     {
         $mode = $this->config['smtp_relay']['mode'] ?? 'to';
 
+        $transport = new SmtpRelayTransport(
+            $this->config['service_account_file'],
+            ['https://mail.google.com/'],
+            $this->config['smtp_relay']
+        );
+
         match ($mode) {
-            'to'    => $this->runSmtpRelayTo(),
-            'bcc'   => $this->runSmtpRelayBcc(),
+            'to'    => $this->runSmtpRelayTo($transport),
+            'bcc'   => $this->runSmtpRelayBcc($transport),
             default => throw new \InvalidArgumentException(
                 "Unknown smtp_relay mode: '{$mode}'. Use 'to' or 'bcc'."
             ),
@@ -208,7 +217,7 @@ class Mailer
      *   2. Sends a monitor/pantau email using the first user.
      *   3. Continues with the next rotation.
      */
-    private function runSmtpRelayTo(): void
+    private function runSmtpRelayTo(SmtpRelayTransport $transport): void
     {
         $this->printLine("Mode: SMTP Relay → TO (round-robin)");
         echo PHP_EOL;
@@ -218,13 +227,12 @@ class Mailer
         $delay        = (int) ($this->config['delay_after_rotation'] ?? 3);
         $monitorEmail = $this->config['monitor_email'] ?? '';
 
-        $rotationSize = $totalUsers;   // one full cycle = one email per user
         $rotationNum  = 0;
 
         for ($i = 0; $i < $totalEmails; $i++) {
             $recipient  = $this->emailList[$i];
             $userIndex  = $i % $totalUsers;
-            $user       = $this->users[$userIndex];
+            $userEmail  = $this->users[$userIndex];
             $userNum    = $userIndex + 1;
             $emailNum   = $i + 1;
 
@@ -238,25 +246,30 @@ class Mailer
                 );
 
                 sleep($delay);
-                $this->sendMonitorEmail($this->users[0], $rotationNum);
+                $this->sendMonitorEmail($transport, $this->users[0], $rotationNum);
                 $this->printLine("");
             }
 
             // Send the email
             $this->printLine(
-                "{$emailNum}. {$recipient} => sending with user {$userNum} ({$user})"
+                "{$emailNum}. {$recipient} => sending with user {$userNum} ({$userEmail})"
             );
 
             try {
-                $transport = new SmtpRelayTransport($user, $this->config['smtp_relay'], $this->googleAuth);
-                $transport->sendSingle(
-                    $recipient,
-                    $this->config['from_name'] ?? 'Sender',
-                    $this->config['subject']   ?? '(no subject)',
-                    $this->renderTemplate($this->htmlTemplate, $recipient),
-                    $this->renderTemplate($this->textTemplate, $recipient),
-                    $this->attachments
-                );
+                $email = (new Email())
+                    ->from(new Address($userEmail, $this->config['from_name'] ?? 'Sender'))
+                    ->to($recipient)
+                    ->subject($this->config['subject'] ?? '(no subject)')
+                    ->html($this->renderTemplate($this->htmlTemplate, $recipient))
+                    ->text($this->renderTemplate($this->textTemplate, $recipient));
+
+                foreach ($this->attachments as $path) {
+                    if (is_file($path) && is_readable($path)) {
+                        $email->attachFromPath($path);
+                    }
+                }
+
+                $transport->send($email, $userEmail);
             } catch (\Throwable $e) {
                 $this->printLine("  [ERROR] Failed to send to {$recipient}: " . $e->getMessage());
             }
@@ -271,7 +284,7 @@ class Mailer
                 "Sending monitor email to {$monitorEmail}..."
             );
             sleep($delay);
-            $this->sendMonitorEmail($this->users[0], $rotationNum);
+            $this->sendMonitorEmail($transport, $this->users[0], $rotationNum);
         }
     }
 
@@ -286,7 +299,7 @@ class Mailer
      *   2. Sends a monitor/pantau email.
      * Users rotate in round-robin order.
      */
-    private function runSmtpRelayBcc(): void
+    private function runSmtpRelayBcc(SmtpRelayTransport $transport): void
     {
         $this->printLine("Mode: SMTP Relay → BCC (batch)");
         echo PHP_EOL;
@@ -295,7 +308,6 @@ class Mailer
         $delayMin     = (int) ($this->config['smtp_relay']['bcc_delay_min']  ?? 1);
         $delayMax     = (int) ($this->config['smtp_relay']['bcc_delay_max']  ?? 3);
         $monitorEmail = $this->config['monitor_email'] ?? '';
-        $totalEmails  = count($this->emailList);
         $totalUsers   = count($this->users);
 
         $batches   = array_chunk($this->emailList, $batchSize);
@@ -304,13 +316,13 @@ class Mailer
         foreach ($batches as $batch) {
             $batchNum++;
             $userIndex = ($batchNum - 1) % $totalUsers;
-            $user      = $this->users[$userIndex];
+            $userEmail = $this->users[$userIndex];
             $userNum   = $userIndex + 1;
             $count     = count($batch);
             $delay     = random_int($delayMin, max($delayMin, $delayMax));
 
             $this->printLine(
-                "[Batch {$batchNum}] User {$userNum} ({$user}) " .
+                "[Batch {$batchNum}] User {$userNum} ({$userEmail}) " .
                 "sending {$count} email(s) via BCC..."
             );
             $this->printLine(
@@ -319,19 +331,28 @@ class Mailer
             );
 
             try {
-                $transport = new SmtpRelayTransport($user, $this->config['smtp_relay'], $this->googleAuth);
-
                 // Use the first recipient's address to render the template
                 // (personalisation is not available in BCC mode)
                 $genericEmail = $batch[0];
-                $transport->sendBcc(
-                    $batch,
-                    $this->config['from_name'] ?? 'Sender',
-                    $this->config['subject']   ?? '(no subject)',
-                    $this->renderTemplate($this->htmlTemplate, $genericEmail),
-                    $this->renderTemplate($this->textTemplate, $genericEmail),
-                    $this->attachments
-                );
+
+                $email = (new Email())
+                    ->from(new Address($userEmail, $this->config['from_name'] ?? 'Sender'))
+                    ->to(new Address($userEmail, $this->config['from_name'] ?? 'Sender'))
+                    ->subject($this->config['subject'] ?? '(no subject)')
+                    ->html($this->renderTemplate($this->htmlTemplate, $genericEmail))
+                    ->text($this->renderTemplate($this->textTemplate, $genericEmail));
+
+                foreach ($batch as $bcc) {
+                    $email->addBcc($bcc);
+                }
+
+                foreach ($this->attachments as $path) {
+                    if (is_file($path) && is_readable($path)) {
+                        $email->attachFromPath($path);
+                    }
+                }
+
+                $transport->send($email, $userEmail);
 
                 $this->printLine("  => Done! Waiting {$delay}s...");
             } catch (\Throwable $e) {
@@ -343,7 +364,7 @@ class Mailer
 
             if ($monitorEmail !== '') {
                 $this->printLine("  => Sending monitor email to {$monitorEmail}");
-                $this->sendMonitorEmail($user, $batchNum);
+                $this->sendMonitorEmail($transport, $userEmail, $batchNum);
             }
 
             echo PHP_EOL;
@@ -402,9 +423,10 @@ class Mailer
     /**
      * Send the monitor/pantau email using the given user.
      *
-     * @param string $user Sender email address
+     * @param SmtpRelayTransport $transport Shared transport instance
+     * @param string $userEmail Sender email address
      */
-    private function sendMonitorEmail(string $user, int $cycleNumber): void
+    private function sendMonitorEmail(SmtpRelayTransport $transport, string $userEmail, int $cycleNumber): void
     {
         $monitorEmail = $this->config['monitor_email'] ?? '';
 
@@ -413,14 +435,14 @@ class Mailer
         }
 
         try {
-            $transport = new SmtpRelayTransport($user, $this->config['smtp_relay'], $this->googleAuth);
-            $transport->sendSingle(
-                $monitorEmail,
-                $this->config['from_name'] ?? 'Sender',
-                "[Monitor] Cycle #{$cycleNumber} complete — " . date('Y-m-d H:i:s'),
-                "<p>Cycle #{$cycleNumber} completed at " . date('Y-m-d H:i:s') . "</p>",
-                "Cycle #{$cycleNumber} completed at " . date('Y-m-d H:i:s')
-            );
+            $email = (new Email())
+                ->from(new Address($userEmail, $this->config['from_name'] ?? 'Sender'))
+                ->to($monitorEmail)
+                ->subject("[Monitor] Cycle #{$cycleNumber} complete — " . date('Y-m-d H:i:s'))
+                ->html("<p>Cycle #{$cycleNumber} completed at " . date('Y-m-d H:i:s') . "</p>")
+                ->text("Cycle #{$cycleNumber} completed at " . date('Y-m-d H:i:s'));
+
+            $transport->send($email, $userEmail);
         } catch (\Throwable $e) {
             $this->printLine("  [WARNING] Monitor email failed: " . $e->getMessage());
         }

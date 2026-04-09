@@ -35,6 +35,9 @@ return [
         'port'       => 587,
         'encryption' => 'tls', // tls, ssl, or none
 
+        // Max emails per SMTP connection before reconnect (safety valve)
+        'max_per_connection' => 100,
+
         // BCC settings — only used when mode = 'bcc'
         'bcc_batch_size'  => 200,   // Number of recipients per BCC batch
         'bcc_delay_min'   => 1,     // Minimum seconds to wait between batches
