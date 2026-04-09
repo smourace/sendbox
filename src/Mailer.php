@@ -30,7 +30,7 @@ class Mailer
     /** @var string[] */
     private array $emailList = [];
 
-    /** @var array<int, array{email: string, password: string, host: string, port: int}> */
+    /** @var string[] */
     private array $users = [];
 
     /** @var string[] */
@@ -38,6 +38,8 @@ class Mailer
 
     private string $htmlTemplate = '';
     private string $textTemplate = '';
+
+    private GoogleAuth $googleAuth;
 
     public function __construct(array $config)
     {
@@ -86,8 +88,9 @@ class Mailer
      */
     private function loadResources(): void
     {
-        $this->emailList = $this->loadLines($this->config['list_file'], 'email list');
-        $this->users     = $this->loadUsers($this->config['user_file']);
+        $this->emailList  = $this->loadLines($this->config['list_file'], 'email list');
+        $this->users      = $this->loadUsers($this->config['user_file']);
+        $this->googleAuth = new GoogleAuth($this->config['service_account_file']);
 
         if (empty($this->emailList)) {
             throw new \RuntimeException("Email list is empty. Add recipients to data/list.txt");
@@ -126,24 +129,13 @@ class Mailer
     }
 
     /**
-     * Parse user.txt and return structured user array.
+     * Parse user.txt and return an array of email addresses (one per line).
      *
-     * @return array<int, array{email: string, password: string, host: string, port: int}>
+     * @return string[]
      */
     private function loadUsers(string $path): array
     {
-        $lines = $this->loadLines($path, 'user list');
-        $users = [];
-
-        foreach ($lines as $i => $line) {
-            try {
-                $users[] = SmtpRelayTransport::parseUserLine($line);
-            } catch (\InvalidArgumentException $e) {
-                $this->printLine("[WARNING] Skipping user line " . ($i + 1) . ": " . $e->getMessage());
-            }
-        }
-
-        return $users;
+        return $this->loadLines($path, 'user list');
     }
 
     /**
@@ -252,11 +244,11 @@ class Mailer
 
             // Send the email
             $this->printLine(
-                "{$emailNum}. {$recipient} => sending with user {$userNum} ({$user['email']})"
+                "{$emailNum}. {$recipient} => sending with user {$userNum} ({$user})"
             );
 
             try {
-                $transport = new SmtpRelayTransport($user);
+                $transport = new SmtpRelayTransport($user, $this->config['smtp_relay'], $this->googleAuth);
                 $transport->sendSingle(
                     $recipient,
                     $this->config['from_name'] ?? 'Sender',
@@ -318,7 +310,7 @@ class Mailer
             $delay     = random_int($delayMin, max($delayMin, $delayMax));
 
             $this->printLine(
-                "[Batch {$batchNum}] User {$userNum} ({$user['email']}) " .
+                "[Batch {$batchNum}] User {$userNum} ({$user}) " .
                 "sending {$count} email(s) via BCC..."
             );
             $this->printLine(
@@ -327,7 +319,7 @@ class Mailer
             );
 
             try {
-                $transport = new SmtpRelayTransport($user);
+                $transport = new SmtpRelayTransport($user, $this->config['smtp_relay'], $this->googleAuth);
 
                 // Use the first recipient's address to render the template
                 // (personalisation is not available in BCC mode)
@@ -363,7 +355,7 @@ class Mailer
     // ─────────────────────────────────────────────────────────────
 
     /**
-     * Gmail API mode — sends via GmailApiTransport (skeleton).
+     * Gmail API mode — sends via GmailApiTransport.
      *
      * Requires a properly configured service-account.json and
      * domain-wide delegation set up in Google Workspace Admin.
@@ -373,8 +365,7 @@ class Mailer
         $this->printLine("Mode: Gmail API");
         echo PHP_EOL;
 
-        $serviceAccountFile = $this->config['service_account_file'] ?? '';
-        $fromEmail          = $this->config['from_email'] ?? '';
+        $fromEmail = $this->config['from_email'] ?? '';
 
         if (empty($fromEmail)) {
             throw new \RuntimeException(
@@ -382,7 +373,7 @@ class Mailer
             );
         }
 
-        $transport = new GmailApiTransport($serviceAccountFile, $fromEmail);
+        $transport = new GmailApiTransport($fromEmail, $this->googleAuth);
         $total     = count($this->emailList);
 
         foreach ($this->emailList as $i => $recipient) {
@@ -411,9 +402,9 @@ class Mailer
     /**
      * Send the monitor/pantau email using the given user.
      *
-     * @param array{email: string, password: string, host: string, port: int} $user
+     * @param string $user Sender email address
      */
-    private function sendMonitorEmail(array $user, int $cycleNumber): void
+    private function sendMonitorEmail(string $user, int $cycleNumber): void
     {
         $monitorEmail = $this->config['monitor_email'] ?? '';
 
@@ -422,7 +413,7 @@ class Mailer
         }
 
         try {
-            $transport = new SmtpRelayTransport($user);
+            $transport = new SmtpRelayTransport($user, $this->config['smtp_relay'], $this->googleAuth);
             $transport->sendSingle(
                 $monitorEmail,
                 $this->config['from_name'] ?? 'Sender',

@@ -15,35 +15,62 @@ use Symfony\Component\Mime\Address;
  * Handles email delivery via SMTP Relay using Symfony Mailer.
  * Supports both single-recipient (TO) mode and batch BCC mode.
  *
- * user.txt format: email|password|smtp_host|smtp_port
+ * Authenticates using a Google Service Account (via GoogleAuth) and
+ * XOAUTH2 — no per-user passwords required.
+ *
+ * SMTP host/port/encryption are read from the 'smtp_relay' section of config.php.
  */
 class SmtpRelayTransport
 {
-    /** @var array{email: string, password: string, host: string, port: int} */
-    private array $user;
+    /** The sender email address (impersonated via service account) */
+    private string $userEmail;
+
+    /** @var array{host: string, port: int, encryption: string} */
+    private array $smtpConfig;
+
+    private GoogleAuth $googleAuth;
 
     private SymfonyMailer $mailer;
 
     /**
-     * @param array{email: string, password: string, host: string, port: int} $user
+     * @param string     $userEmail  Sender email address (from user.txt)
+     * @param array      $smtpConfig SMTP settings from config.php smtp_relay section
+     * @param GoogleAuth $googleAuth GoogleAuth instance for token generation
      */
-    public function __construct(array $user)
+    public function __construct(string $userEmail, array $smtpConfig, GoogleAuth $googleAuth)
     {
-        $this->user = $user;
-        $this->mailer = $this->buildMailer();
+        $this->userEmail  = $userEmail;
+        $this->smtpConfig = $smtpConfig;
+        $this->googleAuth = $googleAuth;
+        $this->mailer     = $this->buildMailer();
     }
 
     /**
-     * Build a Symfony Mailer instance for this SMTP user.
+     * Build a Symfony Mailer instance using XOAUTH2 authentication.
+     *
+     * Obtains an OAuth2 access token for the sender via GoogleAuth and
+     * constructs the DSN using the xoauth2 auth mode.
      */
     private function buildMailer(): SymfonyMailer
     {
+        $accessToken = $this->googleAuth->getAccessToken($this->userEmail);
+
+        $encryption = $this->smtpConfig['encryption'] ?? 'tls';
+        $scheme     = ($encryption === 'ssl') ? 'smtps' : 'smtp';
+
+        $queryParams = ['auth_mode' => 'xoauth2'];
+        if ($encryption !== 'ssl' && $encryption !== 'none') {
+            $queryParams['encryption'] = $encryption;
+        }
+
         $dsn = sprintf(
-            'smtp://%s:%s@%s:%d',
-            rawurlencode($this->user['email']),
-            rawurlencode($this->user['password']),
-            $this->user['host'],
-            $this->user['port']
+            '%s://%s:%s@%s:%d?%s',
+            $scheme,
+            rawurlencode($this->userEmail),
+            rawurlencode($accessToken),
+            $this->smtpConfig['host'],
+            (int) $this->smtpConfig['port'],
+            http_build_query($queryParams)
         );
 
         $transport = Transport::fromDsn($dsn);
@@ -69,7 +96,7 @@ class SmtpRelayTransport
         array $attachments = []
     ): void {
         $email = (new Email())
-            ->from(new Address($this->user['email'], $fromName))
+            ->from(new Address($this->userEmail, $fromName))
             ->to($to)
             ->subject($subject)
             ->html($htmlBody)
@@ -107,9 +134,9 @@ class SmtpRelayTransport
         }
 
         $email = (new Email())
-            ->from(new Address($this->user['email'], $fromName))
+            ->from(new Address($this->userEmail, $fromName))
             // Use sender's own address as the visible "To" recipient when using BCC mode
-            ->to(new Address($this->user['email'], $fromName))
+            ->to(new Address($this->userEmail, $fromName))
             ->subject($subject)
             ->html($htmlBody)
             ->text($textBody);
@@ -132,30 +159,6 @@ class SmtpRelayTransport
      */
     public function getEmail(): string
     {
-        return $this->user['email'];
-    }
-
-    /**
-     * Parse a single line from user.txt into a user array.
-     *
-     * @throws \InvalidArgumentException if the line format is invalid
-     * @return array{email: string, password: string, host: string, port: int}
-     */
-    public static function parseUserLine(string $line): array
-    {
-        $parts = explode('|', trim($line));
-
-        if (count($parts) !== 4) {
-            throw new \InvalidArgumentException(
-                "Invalid user line format. Expected: email|password|smtp_host|smtp_port"
-            );
-        }
-
-        return [
-            'email'    => trim($parts[0]),
-            'password' => trim($parts[1]),
-            'host'     => trim($parts[2]),
-            'port'     => (int) trim($parts[3]),
-        ];
+        return $this->userEmail;
     }
 }

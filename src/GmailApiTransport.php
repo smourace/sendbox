@@ -7,8 +7,8 @@ namespace App;
 /**
  * GmailApiTransport
  *
- * Skeleton / placeholder for sending emails via the Gmail API
- * using a Google Service Account (domain-wide delegation).
+ * Sends emails via the Gmail API using a Google Service Account
+ * (domain-wide delegation) provided through a GoogleAuth instance.
  *
  * Full implementation requires:
  * - A Google Cloud project with Gmail API enabled
@@ -19,42 +19,32 @@ namespace App;
  */
 class GmailApiTransport
 {
-    /** Path to the service-account.json file */
-    private string $serviceAccountFile;
-
     /** Gmail address to impersonate (must belong to the GSuite/Workspace domain) */
     private string $impersonatedEmail;
 
+    private GoogleAuth $googleAuth;
+
     /**
-     * @param string $serviceAccountFile Absolute path to service-account.json
-     * @param string $impersonatedEmail  Email address to send from (impersonation)
+     * @param string     $impersonatedEmail Email address to send from (impersonation)
+     * @param GoogleAuth $googleAuth        GoogleAuth instance for service account auth
      */
-    public function __construct(string $serviceAccountFile, string $impersonatedEmail)
+    public function __construct(string $impersonatedEmail, GoogleAuth $googleAuth)
     {
-        $this->serviceAccountFile = $serviceAccountFile;
-        $this->impersonatedEmail  = $impersonatedEmail;
+        $this->impersonatedEmail = $impersonatedEmail;
+        $this->googleAuth        = $googleAuth;
     }
 
     /**
      * Build and return an authenticated Google_Client instance.
      *
-     * @throws \RuntimeException if the service account file is missing
+     * Delegates to GoogleAuth so that service account configuration
+     * is managed centrally.
+     *
      * @return \Google_Client
      */
     private function buildClient(): \Google_Client
     {
-        if (!file_exists($this->serviceAccountFile)) {
-            throw new \RuntimeException(
-                "Service account file not found: {$this->serviceAccountFile}"
-            );
-        }
-
-        $client = new \Google_Client();
-        $client->setAuthConfig($this->serviceAccountFile);
-        $client->setScopes([\Google_Service_Gmail::GMAIL_SEND]);
-        $client->setSubject($this->impersonatedEmail);
-
-        return $client;
+        return $this->googleAuth->buildClient($this->impersonatedEmail);
     }
 
     /**

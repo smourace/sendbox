@@ -30,6 +30,11 @@ return [
         // Mode: 'to' (individual round-robin) or 'bcc' (batch via BCC)
         'mode' => 'to',
 
+        // SMTP server settings (applies to all users)
+        'host'       => 'smtp-relay.gmail.com',
+        'port'       => 587,
+        'encryption' => 'tls', // tls, ssl, or none
+
         // BCC settings — only used when mode = 'bcc'
         'bcc_batch_size'  => 200,   // Number of recipients per BCC batch
         'bcc_delay_min'   => 1,     // Minimum seconds to wait between batches
