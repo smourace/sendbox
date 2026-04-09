@@ -86,7 +86,7 @@ All settings live in **`config.php`**. You never need to touch the source files.
 | `smtp_relay.bcc_delay_min` | int | Min seconds between BCC batches |
 | `smtp_relay.bcc_delay_max` | int | Max seconds between BCC batches |
 | `monitor_email` | string | Receives a copy after every rotation/batch |
-| `delay_after_rotation` | int | Seconds to wait after each TO-mode rotation |
+| `delay_after_rotation` | int | Seconds to wait after each TO-mode batch |
 | `list_file` | path | Path to recipient list |
 | `user_file` | path | Path to sender email list |
 | `service_account_file` | path | Path to Google service account JSON |
@@ -146,7 +146,7 @@ Templates support the following placeholders:
 
 ## Sending Modes
 
-### SMTP Relay — TO Mode (Round-Robin)
+### SMTP Relay — TO Mode (Batch Round-Robin)
 
 ```php
 'method'     => 'smtp_relay',
@@ -160,23 +160,29 @@ Templates support the following placeholders:
 
 **Flow:**
 
-1. Iterates over every recipient in `list.txt`.
-2. Assigns each recipient to the next sender in round-robin order.
+1. Splits `list.txt` into batches where each batch contains **up to** as many recipients as there are senders (last batch may be smaller if the recipient count is not evenly divisible by the number of users).
+2. Within each batch, every email is sent immediately in round-robin order — **no delay between individual emails**.
 3. Each sender authenticates via XOAUTH2 using the service account.
-4. After one full rotation (all senders used once):
+4. After each batch completes:
    - Waits `delay_after_rotation` seconds.
    - Sends a monitor email to `monitor_email`.
-5. Continues until all recipients are processed.
+5. Continues with the next batch until all recipients are processed.
 
 **Console output example:**
 
 ```
+Mode: SMTP Relay → TO (round-robin)
+
+[Batch 1]
 1. recipient1@example.com => sending with user 1 (kara@gateway.dpdns.org)
 2. recipient2@example.com => sending with user 2 (dwiki@02438758-5465-4dbc-a6ae-2fddfd374c29.dedyn.io)
 3. recipient3@example.com => sending with user 3 (masako@gateway.dpdns.org)
-...
-[Wait 3s] Rotation #1 complete. Sending monitor email to pantau@example.com using user 1...
+
+[Wait 3s] Batch #1 complete. Sending monitor email to pantau@example.com...
+
+[Batch 2]
 4. recipient4@example.com => sending with user 1 (kara@gateway.dpdns.org)
+5. recipient5@example.com => sending with user 2 (dwiki@02438758-5465-4dbc-a6ae-2fddfd374c29.dedyn.io)
 ...
 ```
 
