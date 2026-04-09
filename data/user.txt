@@ -1,0 +1,3 @@
+user1@smtp.example.com|password1|smtp.example.com|587
+user2@smtp.example.com|password2|smtp.example.com|587
+user3@smtp.example.com|password3|smtp.example.com|465

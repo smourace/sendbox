@@ -1,0 +1,10 @@
+recipient1@example.com
+recipient2@example.com
+recipient3@example.com
+recipient4@example.com
+recipient5@example.com
+recipient6@example.com
+recipient7@example.com
+recipient8@example.com
+recipient9@example.com
+recipient10@example.com
