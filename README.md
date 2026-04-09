@@ -1,7 +1,7 @@
 # Sendbox — PHP Email Sender
 
 A flexible, config-driven PHP email sender built on **Symfony Mailer**.  
-Supports SMTP Relay (round-robin TO and BCC batch modes) and a Gmail API skeleton.
+Supports SMTP Relay (round-robin TO and BCC batch modes) and Gmail API, both authenticated via a Google Service Account.
 
 ---
 
@@ -16,7 +16,7 @@ Supports SMTP Relay (round-robin TO and BCC batch modes) and a Gmail API skeleto
 7. [Sending Modes](#sending-modes)
    - [SMTP Relay — TO Mode](#smtp-relay--to-mode-round-robin)
    - [SMTP Relay — BCC Mode](#smtp-relay--bcc-mode-batch)
-   - [Gmail API Mode](#gmail-api-mode-skeleton)
+   - [Gmail API Mode](#gmail-api-mode)
 8. [Attachments](#attachments)
 9. [Running the Sender](#running-the-sender)
 10. [Example Output](#example-output)
@@ -27,6 +27,7 @@ Supports SMTP Relay (round-robin TO and BCC batch modes) and a Gmail API skeleto
 
 - PHP **8.1** or later
 - [Composer](https://getcomposer.org/)
+- A Google Workspace domain with a Service Account configured for domain-wide delegation
 
 ---
 
@@ -49,8 +50,8 @@ sendbox/
 ├── composer.json                 # Dependencies
 ├── data/
 │   ├── list.txt                  # Recipient email list (one address per line)
-│   ├── user.txt                  # SMTP credentials (email|password|host|port)
-│   └── service-account.json      # Google Service Account JSON (Gmail API)
+│   ├── user.txt                  # Sender email addresses (one per line, no passwords)
+│   └── service-account.json      # Google Service Account JSON (used for all auth)
 ├── template/
 │   ├── template.html             # HTML email template
 │   └── template.txt              # Plain-text email template
@@ -59,9 +60,10 @@ sendbox/
 │   ├── dokumen.docs
 │   └── file.file
 ├── src/
+│   ├── GoogleAuth.php            # Centralised Google Service Account auth
 │   ├── Mailer.php                # Main orchestrator
-│   ├── SmtpRelayTransport.php    # SMTP Relay transport (Symfony Mailer)
-│   └── GmailApiTransport.php     # Gmail API transport (skeleton)
+│   ├── SmtpRelayTransport.php    # SMTP Relay transport (XOAUTH2 via service account)
+│   └── GmailApiTransport.php     # Gmail API transport
 └── README.md
 ```
 
@@ -77,13 +79,16 @@ All settings live in **`config.php`**. You never need to touch the source files.
 | `from_name` | string | Sender display name |
 | `method` | string | `smtp_relay` or `gmail_api` |
 | `smtp_relay.mode` | string | `to` (individual) or `bcc` (batch) |
+| `smtp_relay.host` | string | SMTP relay server hostname |
+| `smtp_relay.port` | int | SMTP relay server port |
+| `smtp_relay.encryption` | string | `tls`, `ssl`, or `none` |
 | `smtp_relay.bcc_batch_size` | int | Recipients per BCC batch (default 200) |
 | `smtp_relay.bcc_delay_min` | int | Min seconds between BCC batches |
 | `smtp_relay.bcc_delay_max` | int | Max seconds between BCC batches |
 | `monitor_email` | string | Receives a copy after every rotation/batch |
 | `delay_after_rotation` | int | Seconds to wait after each TO-mode rotation |
 | `list_file` | path | Path to recipient list |
-| `user_file` | path | Path to SMTP user credentials |
+| `user_file` | path | Path to sender email list |
 | `service_account_file` | path | Path to Google service account JSON |
 | `html_template` | path | Path to HTML template |
 | `text_template` | path | Path to plain-text template |
@@ -105,16 +110,25 @@ user2@example.com
 
 ### `data/user.txt`
 
-One SMTP user per line in `email|password|smtp_host|smtp_port` format:
+One **sender** email address per line — no passwords, no host, no port.  
+Authentication is handled entirely by `service-account.json`:
 
 ```
-sender@domain.com|p@ssword|mail.domain.com|587
+kara@gateway.dpdns.org
+dwiki@02438758-5465-4dbc-a6ae-2fddfd374c29.dedyn.io
+masako@gateway.dpdns.org
 ```
 
 ### `data/service-account.json`
 
 Google Service Account JSON file downloaded from the Google Cloud Console.  
-Replace the placeholder content with your real credentials for Gmail API mode.
+This single file is used to authenticate **all** sending methods (SMTP Relay XOAUTH2, Gmail API).
+
+**Setup requirements:**
+1. Create a Service Account in Google Cloud Console with domain-wide delegation enabled.
+2. In Google Workspace Admin, grant the service account the OAuth scope:  
+   `https://mail.google.com/`
+3. Place the downloaded JSON file at `data/service-account.json`.
 
 ---
 
@@ -136,27 +150,33 @@ Templates support the following placeholders:
 
 ```php
 'method'     => 'smtp_relay',
-'smtp_relay' => ['mode' => 'to'],
+'smtp_relay' => [
+    'mode'       => 'to',
+    'host'       => 'smtp-relay.gmail.com',
+    'port'       => 587,
+    'encryption' => 'tls',
+],
 ```
 
 **Flow:**
 
 1. Iterates over every recipient in `list.txt`.
-2. Assigns each recipient to the next SMTP user in round-robin order.
-3. After one full rotation (all users used once):
+2. Assigns each recipient to the next sender in round-robin order.
+3. Each sender authenticates via XOAUTH2 using the service account.
+4. After one full rotation (all senders used once):
    - Waits `delay_after_rotation` seconds.
    - Sends a monitor email to `monitor_email`.
-4. Continues until all recipients are processed.
+5. Continues until all recipients are processed.
 
 **Console output example:**
 
 ```
-1. recipient1@example.com => sending with user 1 (user1@smtp.example.com)
-2. recipient2@example.com => sending with user 2 (user2@smtp.example.com)
-3. recipient3@example.com => sending with user 3 (user3@smtp.example.com)
+1. recipient1@example.com => sending with user 1 (kara@gateway.dpdns.org)
+2. recipient2@example.com => sending with user 2 (dwiki@02438758-5465-4dbc-a6ae-2fddfd374c29.dedyn.io)
+3. recipient3@example.com => sending with user 3 (masako@gateway.dpdns.org)
 ...
 [Wait 3s] Rotation #1 complete. Sending monitor email to pantau@example.com using user 1...
-4. recipient4@example.com => sending with user 1 (user1@smtp.example.com)
+4. recipient4@example.com => sending with user 1 (kara@gateway.dpdns.org)
 ...
 ```
 
@@ -168,6 +188,9 @@ Templates support the following placeholders:
 'method'     => 'smtp_relay',
 'smtp_relay' => [
     'mode'           => 'bcc',
+    'host'           => 'smtp-relay.gmail.com',
+    'port'           => 587,
+    'encryption'     => 'tls',
     'bcc_batch_size' => 200,
     'bcc_delay_min'  => 1,
     'bcc_delay_max'  => 3,
@@ -178,7 +201,7 @@ Templates support the following placeholders:
 
 1. Splits `list.txt` into chunks of `bcc_batch_size`.
 2. Each chunk is sent as a single email with all recipients in BCC.
-3. Users rotate in round-robin across batches.
+3. Senders rotate in round-robin across batches.
 4. After each batch:
    - Waits a random delay between `bcc_delay_min` and `bcc_delay_max` seconds.
    - Sends a monitor email to `monitor_email`.
@@ -191,22 +214,21 @@ Templates support the following placeholders:
   => Done! Waiting 2s...
   => Sending monitor email to pantau@example.com
 
-[Batch 2] User 2 (dwiki@example.dedyn.io) sending 200 emails via BCC...
+[Batch 2] User 2 (dwiki@02438758-5465-4dbc-a6ae-2fddfd374c29.dedyn.io) sending 200 emails via BCC...
 ...
 ```
 
 ---
 
-### Gmail API Mode (Skeleton)
+### Gmail API Mode
 
 ```php
 'method'     => 'gmail_api',
 'from_email' => 'sender@yourdomain.com',
 ```
 
-The `GmailApiTransport` class provides a ready-to-fill skeleton.  
-To activate it, configure your Google Cloud project and service account with  
-domain-wide delegation and the `https://www.googleapis.com/auth/gmail.send` scope.
+Sends via the Gmail API using the service account for authentication.  
+Configure your Google Cloud project with Gmail API enabled and domain-wide delegation.
 
 ---
 
